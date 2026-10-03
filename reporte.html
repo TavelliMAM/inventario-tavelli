@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Reporte — Inventario Diario Tavelli</title>
+<meta name="description" content="Reporte consolidado del inventario diario — Tavelli">
+<meta name="theme-color" content="#161616">
+<link rel="icon" href="icons/icon-192.png">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script>
+const state = {
+  reportDate: todayStr(0),
+  reportSearch:'',
+  reportAreaFilter:null,
+  dayCache:{},
+  referenceCache:{},
+  loading:false,
+  uploadDate: shiftDate(todayStr(0), -1),
+  uploadStatus:null,
+};
+
+async function init(){
+  await loadProducts();
+  render();
+  await refresh();
+}
+
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = `
+    <div class="topbar no-print">
+      <div class="brand"><div><h1>Reporte — Inventario Tavelli</h1></div></div>
+      <span class="tag">${esc(humanDate(state.reportDate))}</span>
+    </div>
+    <main>${reportView()}</main>`;
+  bindView();
+}
+
+function reportView(){
+  const cache = state.dayCache[state.reportDate];
+  const prevDate = shiftDate(state.reportDate, -1);
+  const reference = state.referenceCache[prevDate];
+
+  const statusChips = AREAS.map(area=>{
+    const has = cache && cache[area];
+    return `<span class="status-chip"><span class="dot ${has?'on':'off'}"></span>${AREA_LABELS[area]}${has?` · ${esc(has.employee||'')}`:' · pendiente'}</span>`;
+  }).join('');
+
+  let tableBody = '';
+  if(state.loading || !cache){
+    tableBody = `<tr><td colspan="6" class="muted" style="padding:20px;text-align:center;">Cargando datos del día…</td></tr>`;
+  } else {
+    const q = state.reportSearch.trim().toLowerCase();
+    let rows = PRODUCTS;
+    if(q) rows = rows.filter(p=>p.descripcion.toLowerCase().includes(q) || p.codigo.toLowerCase().includes(q));
+    if(state.reportAreaFilter) rows = rows.filter(p=> state.reportAreaFilter in (p.areas||{}));
+
+    tableBody = rows.map(p=>{
+      const own = Object.keys(p.areas||{});
+      const today = aggregate(cache, p);
+      const refQty = reference ? reference[p.codigo] : undefined;
+      const areaLabel = own.map(a=>AREA_LABELS[a]).join(' + ');
+
+      let qtyCell;
+      if(today.anyEntry){
+        qtyCell = `${fmtNum(today.total)} <span class="muted">${esc(p.unidad)}</span>`;
+      } else if(today.status === 'na'){
+        qtyCell = `<span class="pill na">N/A</span>`;
+      } else if(today.status === 'missing'){
+        qtyCell = `<span class="pill pending" style="background:var(--bad-soft);color:var(--bad);">Sin dato</span>`;
+      } else {
+        qtyCell = `<span class="pill pending">Pendiente</span>`;
+      }
+      const yCell = (refQty !== undefined) ? `${fmtNum(refQty)} <span class="muted">${esc(p.unidad)}</span>` : (reference ? '<span class="muted">—</span>' : '<span class="muted">s/d</span>');
+
+      return `<tr>
+        <td class="mono muted">${esc(p.codigo)}</td>
+        <td>${esc(p.descripcion)}</td>
+        <td class="area-tag">${esc(areaLabel)}</td>
+        <td class="num">${qtyCell}</td>
+        <td class="num">${yCell}</td>
+        <td class="muted">${esc(today.obs)}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  const areaFilterChips = AREAS.map(a=>`<button class="ghost-btn" data-act="area-filter" data-area="${a}" style="${state.reportAreaFilter===a?'border-color:var(--blue);color:var(--blue);':''}">${AREA_LABELS[a]}</button>`).join('');
+
+  return `
+    <div class="eyebrow">Reporte consolidado</div>
+    <div class="report-toolbar no-print">
+      <div class="date-nav">
+        <button data-act="date-prev">‹</button>
+        <span class="d">${esc(humanDate(state.reportDate))}</span>
+        <button data-act="date-next" ${state.reportDate===todayStr(0)?'disabled':''}>›</button>
+      </div>
+      <button class="ghost-btn" data-act="date-today">Hoy</button>
+    </div>
+    <div class="status-row no-print">${statusChips}</div>
+
+    <div class="section-card no-print">
+      <h3>Cargar inventario del día anterior</h3>
+      <p class="hint">Sube el archivo de stock real (Excel o CSV, con columnas de código y cantidad) del día anterior para que los empleados lo vean como referencia al contar hoy.</p>
+      <div class="upload-row">
+        <div class="field" style="margin-top:0;">
+          <label for="upload-date">Fecha del inventario que subes</label>
+          <input type="date" id="upload-date" value="${esc(state.uploadDate)}">
+        </div>
+        <label class="file-btn">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 16V4m0 0 4 4m-4-4L8 8M4 16v3a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          Elegir archivo (.xlsx, .csv)
+          <input type="file" id="upload-file" accept=".xlsx,.xls,.csv">
+        </label>
+      </div>
+      ${state.uploadStatus ? `<div class="ref-status">Última carga: <b>${state.uploadStatus.count}</b> productos desde "${esc(state.uploadStatus.filename)}".</div>` : ''}
+    </div>
+
+    <div class="export-row no-print">
+      <button data-act="export-xlsx"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Descargar Excel</button>
+      <button data-act="export-csv"><svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Descargar CSV</button>
+      <button data-act="print"><svg viewBox="0 0 24 24" fill="none"><path d="M6 9V3h12v6M6 18H4a1 1 0 0 1-1-1v-6a1 1 0 0 1 1-1h16a1 1 0 0 1 1 1v6a1 1 0 0 1-1 1h-2M6 14h12v7H6z" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Imprimir</button>
+    </div>
+
+    <div class="report-toolbar no-print" style="margin-top:16px;">
+      <input class="search-box" style="max-width:260px;margin-top:0;" id="report-search" type="text" placeholder="Buscar producto o código…" value="${esc(state.reportSearch)}">
+      ${areaFilterChips}
+      ${state.reportAreaFilter ? '<button class="ghost-btn" data-act="area-clear">Quitar filtro</button>' : ''}
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Código</th><th>Producto</th><th>Área</th><th>Cantidad hoy</th><th>Ayer</th><th>Obs.</th></tr></thead>
+        <tbody>${tableBody}</tbody>
+      </table>
+    </div>`;
+}
+
+function bindView(){
+  const app = document.getElementById('app');
+  const prevBtn = app.querySelector('[data-act="date-prev"]');
+  if(prevBtn) prevBtn.onclick = async ()=>{ state.reportDate = shiftDate(state.reportDate,-1); await refresh(); };
+  const nextBtn = app.querySelector('[data-act="date-next"]');
+  if(nextBtn) nextBtn.onclick = async ()=>{ state.reportDate = shiftDate(state.reportDate,1); await refresh(); };
+  const todayBtn = app.querySelector('[data-act="date-today"]');
+  if(todayBtn) todayBtn.onclick = async ()=>{ state.reportDate = todayStr(0); await refresh(); };
+  const rs = document.getElementById('report-search');
+  if(rs){ rs.oninput = e=>{ state.reportSearch = e.target.value; render(); }; rs.focus(); rs.selectionStart = rs.selectionEnd = rs.value.length; }
+  app.querySelectorAll('[data-act="area-filter"]').forEach(b=>{
+    b.onclick = ()=>{ state.reportAreaFilter = state.reportAreaFilter===b.dataset.area ? null : b.dataset.area; render(); };
+  });
+  const clearBtn = app.querySelector('[data-act="area-clear"]');
+  if(clearBtn) clearBtn.onclick = ()=>{ state.reportAreaFilter=null; render(); };
+  const xlsxBtn = app.querySelector('[data-act="export-xlsx"]');
+  if(xlsxBtn) xlsxBtn.onclick = exportXlsx;
+  const csvBtn = app.querySelector('[data-act="export-csv"]');
+  if(csvBtn) csvBtn.onclick = exportCsv;
+  const printBtn = app.querySelector('[data-act="print"]');
+  if(printBtn) printBtn.onclick = ()=>window.print();
+  const uploadDateEl = document.getElementById('upload-date');
+  if(uploadDateEl) uploadDateEl.onchange = e=>{ state.uploadDate = e.target.value; };
+  const uploadFileEl = document.getElementById('upload-file');
+  if(uploadFileEl) uploadFileEl.onchange = onUploadReferenceFile;
+}
+
+async function loadDay(dateStr){
+  if(state.dayCache[dateStr]) return state.dayCache[dateStr];
+  const res = await apiGetDay(dateStr);
+  state.dayCache[dateStr] = res.areas || {};
+  return state.dayCache[dateStr];
+}
+async function loadReference(dateStr){
+  if(state.referenceCache[dateStr] !== undefined) return state.referenceCache[dateStr];
+  const res = await apiGetReference(dateStr);
+  state.referenceCache[dateStr] = res.values || null;
+  return state.referenceCache[dateStr];
+}
+
+async function refresh(){
+  state.loading = true;
+  render();
+  await loadDay(state.reportDate);
+  await loadReference(shiftDate(state.reportDate, -1));
+  state.loading = false;
+  render();
+}
+
+function parseReferenceRows(aoa){
+  if(!aoa || !aoa.length) return null;
+  const header = (aoa[0]||[]).map(h=>String(h||'').toLowerCase().trim());
+  const codeIdx = header.findIndex(h=>h.includes('codig'));
+  const qtyIdx = header.findIndex(h=>h.includes('cant'));
+  if(codeIdx < 0 || qtyIdx < 0) return null;
+  const values = {};
+  let count = 0;
+  for(let i=1; i<aoa.length; i++){
+    const row = aoa[i];
+    if(!row) continue;
+    let codigo = row[codeIdx];
+    if(codigo === undefined || codigo === '' || codigo === null) continue;
+    codigo = (typeof codigo === 'number') ? String(Math.trunc(codigo)) : String(codigo).trim();
+    if(!codigo) continue;
+    const qty = Number(row[qtyIdx]);
+    if(Number.isNaN(qty)) continue;
+    values[codigo] = qty;
+    count++;
+  }
+  return {values, count};
+}
+
+async function onUploadReferenceFile(e){
+  const file = e.target.files && e.target.files[0];
+  if(!file) return;
+  if(!apiConfigured()){ toast('Falta configurar el backend en config.js.', true); return; }
+  try{
+    const buf = await file.arrayBuffer();
+    const wb = XLSX.read(buf, {type:'array'});
+    const sheet = wb.Sheets[wb.SheetNames[0]];
+    const aoa = XLSX.utils.sheet_to_json(sheet, {header:1, raw:true});
+    const parsed = parseReferenceRows(aoa);
+    if(!parsed || parsed.count === 0){
+      toast('No se encontraron columnas de código y cantidad en el archivo.', true);
+      return;
+    }
+    const dateStr = state.uploadDate;
+    await apiSaveReference({date: dateStr, values: parsed.values, filename: file.name});
+    state.referenceCache[dateStr] = parsed.values;
+    state.uploadStatus = {count: parsed.count, filename: file.name};
+    toast(`Inventario del ${humanDate(dateStr)} cargado: ${parsed.count} productos.`);
+    render();
+  }catch(err){
+    toast('No se pudo leer o guardar el archivo.', true);
+  }finally{
+    e.target.value = '';
+  }
+}
+
+function buildReportRows(){
+  const cache = state.dayCache[state.reportDate];
+  const prevDate = shiftDate(state.reportDate, -1);
+  const reference = state.referenceCache[prevDate];
+  return PRODUCTS.map(p=>{
+    const today = aggregate(cache, p);
+    const own = Object.keys(p.areas||{}).map(a=>AREA_LABELS[a]).join(' + ');
+    let qty = '';
+    if(today.anyEntry) qty = today.total;
+    else if(today.status === 'na') qty = 'N/A';
+    else if(today.status === 'missing') qty = 'Sin dato';
+    else qty = 'Pendiente';
+    const refQty = reference ? reference[p.codigo] : undefined;
+    return {
+      codigo: p.codigo, descripcion: p.descripcion, area: own, unidad: p.unidad,
+      cantidad_hoy: qty, cantidad_ayer: refQty !== undefined ? refQty : (reference?'—':'s/d'),
+      observaciones: today.obs
+    };
+  });
+}
+
+function exportXlsx(){
+  if(typeof XLSX === 'undefined'){ toast('No se pudo cargar el generador de Excel.', true); return; }
+  const rows = buildReportRows();
+  const header = ['Código','Descripción','Área','Unidad','Cantidad hoy','Cantidad ayer','Observaciones'];
+  const data = [header, ...rows.map(r=>[r.codigo, r.descripcion, r.area, r.unidad, r.cantidad_hoy, r.cantidad_ayer, r.observaciones])];
+  const ws = XLSX.utils.aoa_to_sheet(data);
+  ws['!cols'] = [{wch:10},{wch:38},{wch:16},{wch:8},{wch:12},{wch:12},{wch:28}];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Inventario ' + state.reportDate);
+  const arrbuf = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+  downloadBlob(`inventario_${state.reportDate}.xlsx`, new Blob([arrbuf], {type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}));
+}
+
+function exportCsv(){
+  const rows = buildReportRows();
+  const header = ['Código','Descripción','Área','Unidad','Cantidad hoy','Cantidad ayer','Observaciones'];
+  const lines = [header, ...rows.map(r=>[r.codigo, r.descripcion, r.area, r.unidad, r.cantidad_hoy, r.cantidad_ayer, r.observaciones])]
+    .map(row => row.map(cell => {
+      const s = String(cell ?? '');
+      return /[",\n;]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s;
+    }).join(';'));
+  const csv = '﻿' + lines.join('\n');
+  downloadBlob(`inventario_${state.reportDate}.csv`, new Blob([csv], {type:'text/csv'}));
+}
+
+init();
+</script>
+</body>
+</html>

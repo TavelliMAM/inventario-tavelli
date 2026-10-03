@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Inventario Diario Tavelli</title>
+<meta name="description" content="Conteo diario de inventario por área — Tavelli">
+<meta name="theme-color" content="#161616">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Tavelli Inv.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Work+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="app"></div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+<script>
+const state = {
+  view:'start',       // start | form
+  area:null,
+  employee:'',
+  items:{},
+  noteOpen:{},
+  search:'',
+  reference:null,
+};
+
+function setState(patch){ Object.assign(state, patch); render(); }
+
+async function init(){
+  await loadProducts();
+  try{
+    const savedName = localStorage.getItem('inv_employee_name');
+    if(savedName) state.employee = savedName;
+  }catch(e){}
+  render();
+  if(!apiConfigured()){
+    toast('Falta configurar el backend en config.js — no se podrá guardar el conteo.', true);
+  }
+}
+
+function render(){
+  const app = document.getElementById('app');
+  app.innerHTML = topbarHtml() + '<main>' + viewHtml() + '</main>';
+  bindView();
+}
+
+function topbarHtml(){
+  const showBack = state.view === 'form';
+  return `
+    <div class="topbar">
+      <div class="brand">
+        ${showBack ? '<button class="back-btn" data-act="back">← Volver</button>' : ''}
+        <div><h1>Inventario Diario Tavelli</h1></div>
+      </div>
+      <span class="tag">${todayStr(0)}</span>
+    </div>`;
+}
+
+function viewHtml(){
+  return state.view === 'form' ? formView() : startView();
+}
+
+function startView(){
+  const cards = AREAS.map(area=>{
+    const n = PRODUCTS_BY_AREA[area].length;
+    const sel = state.area===area ? ' selected' : '';
+    return `<button class="area-card${sel}" data-act="pick-area" data-area="${area}">
+      <svg viewBox="0 0 24 24">${AREA_ICONS[area]}</svg>
+      <span class="name">${AREA_LABELS[area]}</span>
+      <span class="count">${n} productos</span>
+    </button>`;
+  }).join('');
+  return `
+    <div class="eyebrow">Paso 1 · 2</div>
+    <h2>¿En qué área vas a contar?</h2>
+    <div class="area-grid">${cards}</div>
+    <div class="field">
+      <label for="emp-name">Tu nombre</label>
+      <input type="text" id="emp-name" placeholder="Ej: María Pérez" value="${esc(state.employee)}">
+    </div>
+    <div class="field">
+      <button class="primary-btn" id="start-count" ${state.area?'':'disabled'}>Comenzar conteo →</button>
+    </div>`;
+}
+
+function formView(){
+  const list = PRODUCTS_BY_AREA[state.area] || [];
+  const q = state.search.trim().toLowerCase();
+  const filtered = q ? list.filter(p => p.descripcion.toLowerCase().includes(q) || p.codigo.toLowerCase().includes(q)) : list;
+  const filledCount = list.filter(p => state.items[p.codigo] && state.items[p.codigo].cantidad !== '' && state.items[p.codigo].cantidad !== undefined).length;
+  const pct = list.length ? Math.round(filledCount/list.length*100) : 0;
+  const reference = state.reference;
+
+  const rows = filtered.map(p=>{
+    const na = !!(p.areas && p.areas[state.area]);
+    const val = state.items[p.codigo] || {};
+    const noteOpen = !!state.noteOpen[p.codigo];
+    const refQty = reference ? reference[p.codigo] : undefined;
+    return `
+      <div class="item-row" data-codigo="${esc(p.codigo)}">
+        <div class="item-info">
+          <div class="desc">${esc(p.descripcion)}</div>
+          <div class="meta">
+            <span class="code mono">#${esc(p.codigo)}</span>
+            ${na ? '<span class="badge opt">Opcional</span>' : ''}
+            ${refQty !== undefined ? `<span class="ref">Ayer: ${fmtNum(refQty)} ${esc(p.unidad)}</span>` : ''}
+          </div>
+        </div>
+        <div class="item-input">
+          <input class="qty-input mono item-qty" type="number" inputmode="decimal" step="any" min="0" placeholder="0" value="${val.cantidad ?? ''}">
+          <span class="unit-tag">${esc(p.unidad)}</span>
+          <button class="note-btn${noteOpen || val.obs ? ' active':''}" data-act="toggle-note" data-codigo="${esc(p.codigo)}" title="Nota">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M4 4h16v12H8l-4 4z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          </button>
+        </div>
+        ${noteOpen ? `<div class="note-row"><input type="text" class="item-obs" placeholder="Observación (opcional)" value="${esc(val.obs||'')}"></div>` : ''}
+      </div>`;
+  }).join('') || '<div class="empty-msg">No hay productos que coincidan con tu búsqueda.</div>';
+
+  return `
+    <div class="form-header">
+      <div class="meta">
+        <div class="who">Área <b>${AREA_LABELS[state.area]}</b> · ${esc(state.employee||'Sin nombre')}</div>
+        <div class="who">${filledCount}/${list.length}</div>
+      </div>
+      <div class="progress-track"><div class="progress-fill" style="width:${pct}%"></div></div>
+      <input class="search-box" id="item-search" type="text" placeholder="Buscar producto o código…" value="${esc(state.search)}">
+    </div>
+    <div class="item-list">${rows}</div>
+    <div class="bottom-bar">
+      <span class="count">${list.length} productos en esta área</span>
+      <button class="primary-btn" id="submit-count">Guardar conteo</button>
+    </div>`;
+}
+
+function bindView(){
+  const app = document.getElementById('app');
+  app.querySelectorAll('[data-act="back"]').forEach(b=>b.onclick=()=>setState({view:'start', items:{}, noteOpen:{}, search:''}));
+
+  if(state.view==='start'){
+    app.querySelectorAll('[data-act="pick-area"]').forEach(b=>{
+      b.onclick = ()=> setState({area:b.dataset.area, items:{}, noteOpen:{}, search:''});
+    });
+    const nameInput = document.getElementById('emp-name');
+    if(nameInput) nameInput.oninput = e=>{ state.employee = e.target.value; };
+    const startBtn = document.getElementById('start-count');
+    if(startBtn) startBtn.onclick = async ()=>{
+      try{ localStorage.setItem('inv_employee_name', state.employee||''); }catch(e){}
+      setState({view:'form'});
+      try{
+        const res = await apiGetReference(shiftDate(todayStr(0), -1));
+        state.reference = res.values || null;
+      }catch(e){ state.reference = null; }
+      render();
+    };
+  }
+
+  if(state.view==='form'){
+    const searchBox = document.getElementById('item-search');
+    if(searchBox){
+      searchBox.oninput = e=>{ state.search = e.target.value; render(); };
+      searchBox.focus(); searchBox.selectionStart = searchBox.selectionEnd = searchBox.value.length;
+    }
+    document.querySelectorAll('.item-row').forEach(row=>{
+      const codigo = row.dataset.codigo;
+      const qtyEl = row.querySelector('.item-qty');
+      if(qtyEl) qtyEl.oninput = e=>{
+        state.items[codigo] = state.items[codigo] || {};
+        state.items[codigo].cantidad = e.target.value;
+        updateProgressOnly();
+      };
+      const obsEl = row.querySelector('.item-obs');
+      if(obsEl) obsEl.oninput = e=>{
+        state.items[codigo] = state.items[codigo] || {};
+        state.items[codigo].obs = e.target.value;
+      };
+      const noteBtn = row.querySelector('[data-act="toggle-note"]');
+      if(noteBtn) noteBtn.onclick = ()=>{ state.noteOpen[codigo] = !state.noteOpen[codigo]; render(); };
+    });
+    const submitBtn = document.getElementById('submit-count');
+    if(submitBtn) submitBtn.onclick = onSubmitCount;
+  }
+}
+
+function updateProgressOnly(){
+  const list = PRODUCTS_BY_AREA[state.area] || [];
+  const filledCount = list.filter(p => state.items[p.codigo] && state.items[p.codigo].cantidad !== '' && state.items[p.codigo].cantidad !== undefined).length;
+  const pct = list.length ? Math.round(filledCount/list.length*100) : 0;
+  const fill = document.querySelector('.progress-fill');
+  if(fill) fill.style.width = pct + '%';
+  const who = document.querySelectorAll('.form-header .who')[1];
+  if(who) who.textContent = `${filledCount}/${list.length}`;
+}
+
+async function onSubmitCount(){
+  if(!apiConfigured()){
+    toast('Falta configurar el backend en config.js.', true);
+    return;
+  }
+  const area = state.area;
+  const date = todayStr(0);
+  try{
+    const existing = await apiGetDay(date);
+    const prevDoc = existing.areas && existing.areas[area];
+    if(prevDoc && prevDoc.employee){
+      const ok = await showConfirm(`Ya existe un conteo de ${AREA_LABELS[area]} para hoy, registrado por ${prevDoc.employee}. ¿Deseas reemplazarlo con el tuyo?`, 'Reemplazar', 'Cancelar');
+      if(!ok) return;
+    }
+    const items = {};
+    for(const [codigo, v] of Object.entries(state.items)){
+      if(v.cantidad === '' || v.cantidad === undefined || v.cantidad === null) continue;
+      items[codigo] = {cantidad: Number(v.cantidad), obs: v.obs || ''};
+    }
+    await apiSaveCount({date, area, employee: state.employee||'', items});
+    toast('Conteo guardado correctamente.');
+    setState({view:'start', items:{}, noteOpen:{}, search:''});
+  }catch(e){
+    toast('No se pudo guardar el conteo. Revisa tu conexión e intenta de nuevo.', true);
+  }
+}
+
+init();
+</script>
+</body>
+</html>
